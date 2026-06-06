@@ -1,0 +1,21 @@
+{
+  "unsw": {
+    "name": "UNSW-NB15",
+    "root": "A:/DATAS/rt-iot2022/UNSW_schemeC_row2D_rgb3_T3_2/UNSW_schemeC_row2D_rgb3_T3_2",
+    "image_size": 16,
+    "description": "14x14x3 correlation-guided traffic images from three consecutive flows; train normal only."
+  },
+  "cic": {
+    "name": "CIC-IDS2017",
+    "root": "A:/DATAS/rt-iot2022/cic_schemeC_v2_rgb_3flows/cic_schemeC_v2_rgb_3flows",
+    "image_size": 16,
+    "description": "8x8x3 correlation-guided traffic images from Wednesday-WorkingHours; train normal only."
+  },
+  "toniot": {
+    "name": "TON_IoT",
+    "root": "A:/DATAS/rt-iot2022/TONIOT_T3_sub/TONIOT_T3_sub",
+    "image_size": 16,
+    "description": "8x8x3 traffic images from TON_IoT train/test network split; train normal only."
+  }
+}
+

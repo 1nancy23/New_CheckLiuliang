@@ -1,0 +1,32 @@
+[
+  {
+    "key": "unsw",
+    "name": "UNSW-NB15",
+    "root": "A:\\DATAS\\rt-iot2022\\UNSW_schemeC_row2D_rgb3_T3_2\\UNSW_schemeC_row2D_rgb3_T3_2",
+    "image_size": 16,
+    "train_normal": 18666,
+    "train_abnormal": 0,
+    "test_normal": 12332,
+    "test_abnormal": 15112
+  },
+  {
+    "key": "cic",
+    "name": "CIC-IDS2017",
+    "root": "A:\\DATAS\\rt-iot2022\\cic_schemeC_v2_rgb_3flows\\cic_schemeC_v2_rgb_3flows",
+    "image_size": 16,
+    "train_normal": 102592,
+    "train_abnormal": 0,
+    "test_normal": 37600,
+    "test_abnormal": 90276
+  },
+  {
+    "key": "toniot",
+    "name": "TON_IoT",
+    "root": "A:\\DATAS\\rt-iot2022\\TONIOT_T3_sub\\TONIOT_T3_sub",
+    "image_size": 16,
+    "train_normal": 5581,
+    "train_abnormal": 0,
+    "test_normal": 2391,
+    "test_abnormal": 3296
+  }
+]
