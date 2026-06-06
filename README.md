@@ -59,3 +59,13 @@
 - 连续三条网络流量映射到 RGB 三通道，窗口内任意异常则该图像标为 abnormal。
 
 `scripts/prepare_datasets.py` 默认不复制大量 PNG，而是在项目内生成 manifest，记录只读参考数据路径和样本数量。若以后只有 CSV，可用 `scripts/preprocess_csv_to_rgb.py` 在项目内生成同样目录结构的数据。
+
+## 对比实验
+
+论文对比方法包括 `IF`、`VAE`、`f-AnoGAN`、`BiGAN`、`MTS-DVGAN`。除 IF 为一次拟合外，其余 PyTorch baseline 均按 30 epoch 训练：
+
+```powershell
+.\scripts\run_comparison_experiments.ps1
+```
+
+结果输出到 `outputs/comparison_30_bs256/<timestamp>/`。

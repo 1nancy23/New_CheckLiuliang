@@ -26,7 +26,7 @@ class DatasetSpec:
 
 def load_dataset_specs(config_path: str | Path) -> dict[str, DatasetSpec]:
     config_path = Path(config_path)
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw = json.loads(config_path.read_text(encoding="utf-8-sig"))
     specs: dict[str, DatasetSpec] = {}
     for key, item in raw.items():
         specs[key] = DatasetSpec(
@@ -180,4 +180,3 @@ def write_manifest(specs: Iterable[DatasetSpec], out_path: str | Path) -> None:
             }
         )
     out_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
-
