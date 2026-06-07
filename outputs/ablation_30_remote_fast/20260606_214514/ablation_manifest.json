@@ -1,0 +1,12 @@
+{
+  "full": "Complete FFT-STGAN-IDS model.",
+  "baseline_gan": "Paper-style baseline: remove spatio-temporal fusion, FFT prior, and cross-layer fusion.",
+  "no_fft_prior": "Remove the learnable FFT band prior branch and its frequency score/loss.",
+  "no_temporal_gru": "Remove the GRU temporal branch inside spatio-temporal fusion.",
+  "no_st_fusion": "Bypass the spatio-temporal/frequency fusion block after each encoder stage.",
+  "no_cffm": "Remove decoder cross-layer feature fusion skip aggregation.",
+  "no_freq_loss": "Keep FFT branch and score, but remove frequency consistency loss.",
+  "no_latent_loss": "Remove discriminator feature matching loss and latent score contribution.",
+  "no_adv_loss": "Remove generator adversarial objective and discriminator score contribution.",
+  "rec_only_score": "Train the full model but use reconstruction error only for anomaly scoring."
+}

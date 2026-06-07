@@ -69,3 +69,13 @@
 ```
 
 结果输出到 `outputs/comparison_30_bs256/<timestamp>/`。
+
+## 消融实验
+
+消融实验按论文中的 Baseline/Proposed 思路，并进一步拆分本方法的 FFT 频域先验、GRU 时序分支、ST 融合、CFFM、频域一致性损失、潜空间损失、对抗损失和异常评分组成。所有变体默认使用 30 epoch 与相同学习率下降策略：
+
+```powershell
+.\scripts\run_ablation_experiments.ps1
+```
+
+结果输出到 `outputs/ablation_30_bs256/<timestamp>/`，其中包含 `ablation_summary.csv`、`ablation_manifest.json`、`ablation_auc_f1.png` 以及每个数据集/变体的模型、指标、ROC、损失曲线和重构图。

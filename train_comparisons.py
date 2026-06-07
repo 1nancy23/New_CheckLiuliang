@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--image-size", type=int, default=16)
+    parser.add_argument("--cache-images", action="store_true")
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--latent-dim", type=int, default=64)
@@ -77,6 +78,7 @@ def main() -> None:
             workers=args.workers,
             image_size=args.image_size,
             seed=args.seed,
+            cache_images=args.cache_images,
         )
         for method in methods:
             method_name = METHOD_NAMES[method]
@@ -108,4 +110,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-size", type=int, default=16)
     parser.add_argument("--max-train", type=int, default=None)
     parser.add_argument("--max-test", type=int, default=None)
+    parser.add_argument("--cache-images", action="store_true")
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--seed", type=int, default=3407)
@@ -62,6 +63,7 @@ def main() -> None:
             max_train=args.max_train,
             max_test=args.max_test,
             seed=args.seed,
+            cache_images=args.cache_images,
         )
         out_dir = Path(args.out_root) / f"{key}_{stamp}"
         print(f"Training {spec.name}: train={bundle.train_size}, test={bundle.test_size}, out={out_dir}")

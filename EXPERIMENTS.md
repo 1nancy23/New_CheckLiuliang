@@ -122,3 +122,26 @@ Unified comparison summary:
 | TON_IoT | f-AnoGAN | 15 | 0.9182 | 0.8837 | 0.9891 | 0.1794 | 0.9334 | 0.9080 |
 | TON_IoT | BiGAN | 30 | 0.6624 | 0.8324 | 0.5228 | 0.1451 | 0.6422 | 0.5247 |
 | TON_IoT | MTS-DVGAN | 30 | 0.8233 | 0.8479 | 0.8471 | 0.2095 | 0.8475 | 0.8578 |
+
+## Ablation Experiments
+
+The ablation runner follows the paper's Baseline/Proposed setting and expands it into component-level variants for the new FFT-based method:
+
+- `full`
+- `baseline_gan`
+- `no_fft_prior`
+- `no_temporal_gru`
+- `no_st_fusion`
+- `no_cffm`
+- `no_freq_loss`
+- `no_latent_loss`
+- `no_adv_loss`
+- `rec_only_score`
+
+Run command:
+
+```powershell
+.\scripts\run_ablation_experiments.ps1
+```
+
+All variants use 30 epochs, the lambda learning-rate decay schedule, normal-only training, and mixed normal/abnormal testing. The remote Tesla P4 run uses the same configured PyTorch environment and may raise batch size/workers to improve GPU utilization.

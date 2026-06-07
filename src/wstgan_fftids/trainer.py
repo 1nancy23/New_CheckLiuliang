@@ -12,12 +12,13 @@ import torch.nn.functional as F
 
 from .data import DataBundle
 from .metrics import best_balanced_accuracy, minmax, roc_points, save_json, save_scores
-from .models import ModelBundle, build_models
+from .models import AblationOptions, ModelBundle, build_models
 from .visualize import save_line_plot, save_metrics_bar, save_reconstruction_grid, save_roc_plot
 
 
 @dataclass
 class TrainConfig:
+    ablation_name: str = "full"
     epochs: int = 30
     lr: float = 2e-4
     beta1: float = 0.5
@@ -35,6 +36,11 @@ class TrainConfig:
     lr_policy: str = "lambda"
     lr_decay_start: int = 15
     eval_every: int = 5
+    summary_path: str = "outputs/summary_metrics.csv"
+    use_fft_prior: bool = True
+    use_temporal: bool = True
+    use_st_fusion: bool = True
+    use_cffm: bool = True
 
 
 def seed_everything(seed: int) -> None:
@@ -96,7 +102,13 @@ def train_one_dataset(bundle: DataBundle, cfg: TrainConfig, out_dir: Path) -> di
     device = choose_device(cfg.device)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    models: ModelBundle = build_models(base_channels=cfg.base_channels, device=device)
+    ablation = AblationOptions(
+        use_fft_prior=cfg.use_fft_prior,
+        use_temporal=cfg.use_temporal,
+        use_st_fusion=cfg.use_st_fusion,
+        use_cffm=cfg.use_cffm,
+    )
+    models: ModelBundle = build_models(base_channels=cfg.base_channels, device=device, ablation=ablation)
     net_g = models.generator
     net_d = models.discriminator
     opt_g = torch.optim.Adam(net_g.parameters(), lr=cfg.lr, betas=(cfg.beta1, 0.999))
@@ -217,6 +229,7 @@ def train_one_dataset(bundle: DataBundle, cfg: TrainConfig, out_dir: Path) -> di
     best_metrics["seconds"] = float(elapsed)
     best_metrics["train_size"] = float(bundle.train_size)
     best_metrics["test_size"] = float(bundle.test_size)
+    best_metrics["variant"] = cfg.ablation_name
     save_json(out_dir / "metrics.json", best_metrics)
     save_scores(out_dir / "scores.csv", score_rows)
     fpr, tpr, roc_auc = roc_data
@@ -226,25 +239,26 @@ def train_one_dataset(bundle: DataBundle, cfg: TrainConfig, out_dir: Path) -> di
     if first_real is not None and first_fake is not None:
         save_reconstruction_grid(out_dir / "reconstruction_grid.png", first_real, first_fake)
 
-    _append_summary(
-        Path("outputs") / "summary_metrics.csv",
-        {
-            "dataset": bundle.spec.key,
-            "name": bundle.spec.name,
-            "out_dir": str(out_dir),
-            "epoch": int(best_metrics["epoch"]),
-            "Threshold": best_metrics["Threshold"],
-            "Acc": best_metrics["Acc"],
-            "Prec": best_metrics["Prec"],
-            "Rec": best_metrics["Rec"],
-            "FAR": best_metrics["FAR"],
-            "F1": best_metrics["F1"],
-            "AUC": best_metrics["AUC"],
-            "seconds": best_metrics["seconds"],
-            "train_size": int(best_metrics["train_size"]),
-            "test_size": int(best_metrics["test_size"]),
-        },
-    )
+    if cfg.summary_path:
+        _append_summary(
+            Path(cfg.summary_path),
+            {
+                "dataset": bundle.spec.key,
+                "name": bundle.spec.name,
+                "out_dir": str(out_dir),
+                "epoch": int(best_metrics["epoch"]),
+                "Threshold": best_metrics["Threshold"],
+                "Acc": best_metrics["Acc"],
+                "Prec": best_metrics["Prec"],
+                "Rec": best_metrics["Rec"],
+                "FAR": best_metrics["FAR"],
+                "F1": best_metrics["F1"],
+                "AUC": best_metrics["AUC"],
+                "seconds": best_metrics["seconds"],
+                "train_size": int(best_metrics["train_size"]),
+                "test_size": int(best_metrics["test_size"]),
+            },
+        )
     return best_metrics
 
 

@@ -98,8 +98,9 @@ class TemporalGRUFusion(nn.Module):
 class SpectralSTFusion(nn.Module):
     """Frequency-aware spatio-temporal fusion module."""
 
-    def __init__(self, channels: int) -> None:
+    def __init__(self, channels: int, use_temporal: bool = True) -> None:
         super().__init__()
+        self.use_temporal = use_temporal
         self.temporal = TemporalGRUFusion(channels)
         self.fuse = nn.Sequential(
             nn.Conv2d(channels * 3, channels, 1, bias=False),
@@ -111,7 +112,7 @@ class SpectralSTFusion(nn.Module):
         )
 
     def forward(self, spatial: torch.Tensor, spectral: torch.Tensor) -> torch.Tensor:
-        temporal = self.temporal(spatial)
+        temporal = self.temporal(spatial) if self.use_temporal else torch.zeros_like(spatial)
         spectral_gate = spectral.expand_as(spatial) if spectral.shape[-2:] == spatial.shape[-2:] else spectral
         return self.fuse(torch.cat([spatial, temporal, spatial * spectral_gate], dim=1))
 
@@ -134,11 +135,36 @@ class CFFM(nn.Module):
         return self.net(x)
 
 
+@dataclass
+class AblationOptions:
+    use_fft_prior: bool = True
+    use_temporal: bool = True
+    use_st_fusion: bool = True
+    use_cffm: bool = True
+
+
+class NeutralBandPrior(nn.Module):
+    """Unit gate used when the frequency prior branch is ablated."""
+
+    def __init__(self, out_channels: int) -> None:
+        super().__init__()
+        self.out_channels = out_channels
+
+    def forward(self, x: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
+        return x.new_ones((x.size(0), self.out_channels, size[0], size[1]))
+
+
 class FFTSTGenerator(nn.Module):
     """Encoder-decoder generator with FFT band priors instead of wavelets."""
 
-    def __init__(self, in_channels: int = 3, base_channels: int = 32) -> None:
+    def __init__(
+        self,
+        in_channels: int = 3,
+        base_channels: int = 32,
+        ablation: AblationOptions | None = None,
+    ) -> None:
         super().__init__()
+        self.ablation = ablation or AblationOptions()
         channels = [base_channels, base_channels * 2, base_channels * 4, base_channels * 8]
         self.encoders = nn.ModuleList()
         self.priors = nn.ModuleList()
@@ -146,8 +172,8 @@ class FFTSTGenerator(nn.Module):
         current = in_channels
         for ch in channels:
             self.encoders.append(ConvBlock(current, ch, stride=2))
-            self.priors.append(FFTBandPrior(ch))
-            self.fusions.append(SpectralSTFusion(ch))
+            self.priors.append(FFTBandPrior(ch) if self.ablation.use_fft_prior else NeutralBandPrior(ch))
+            self.fusions.append(SpectralSTFusion(ch, use_temporal=self.ablation.use_temporal))
             current = ch
 
         self.up3 = nn.ConvTranspose2d(channels[3], channels[2], 4, stride=2, padding=1, bias=False)
@@ -173,7 +199,8 @@ class FFTSTGenerator(nn.Module):
         for encoder, prior, fusion in zip(self.encoders, self.priors, self.fusions):
             out = encoder(out)
             spectral = prior(raw, out.shape[-2:])
-            out = fusion(out, spectral)
+            if self.ablation.use_st_fusion:
+                out = fusion(out, spectral)
             features.append(out)
             priors.append(spectral)
         return features, priors
@@ -182,11 +209,14 @@ class FFTSTGenerator(nn.Module):
         feats, priors = self.encode(x)
         x4 = feats[-1]
         d3 = F.relu(self.up3(x4), inplace=True)
-        d3 = self.cffm3(torch.cat([d3, feats[2]], dim=1))
+        if self.ablation.use_cffm:
+            d3 = self.cffm3(torch.cat([d3, feats[2]], dim=1))
         d2 = F.relu(self.up2(d3), inplace=True)
-        d2 = self.cffm2(torch.cat([d2, feats[1]], dim=1))
+        if self.ablation.use_cffm:
+            d2 = self.cffm2(torch.cat([d2, feats[1]], dim=1))
         d1 = F.relu(self.up1(d2), inplace=True)
-        d1 = self.cffm1(torch.cat([d1, feats[0]], dim=1))
+        if self.ablation.use_cffm:
+            d1 = self.cffm1(torch.cat([d1, feats[0]], dim=1))
         d0 = self.up0(d1)
         return self.out(d0), feats, priors
 
@@ -236,8 +266,11 @@ class ModelBundle:
     discriminator: Discriminator
 
 
-def build_models(base_channels: int = 32, device: torch.device | str = "cpu") -> ModelBundle:
-    generator = FFTSTGenerator(base_channels=base_channels).to(device)
+def build_models(
+    base_channels: int = 32,
+    device: torch.device | str = "cpu",
+    ablation: AblationOptions | None = None,
+) -> ModelBundle:
+    generator = FFTSTGenerator(base_channels=base_channels, ablation=ablation).to(device)
     discriminator = Discriminator(base_channels=base_channels).to(device)
     return ModelBundle(generator, discriminator)
-

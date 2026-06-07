@@ -5,6 +5,7 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 from PIL import Image
@@ -60,6 +61,8 @@ class TrafficImageDataset(Dataset):
         train_normal_only: bool = False,
         max_samples: int | None = None,
         seed: int = 3407,
+        cache_images: bool = False,
+        cache_workers: int = 0,
     ) -> None:
         self.split_root = Path(split_root)
         paths = list_images(self.split_root)
@@ -91,14 +94,27 @@ class TrafficImageDataset(Dataset):
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
+        self.cached_tensors = None
+        if cache_images:
+            if cache_workers > 1:
+                with ThreadPoolExecutor(max_workers=cache_workers) as executor:
+                    self.cached_tensors = list(executor.map(self._load_tensor, self.paths))
+            else:
+                self.cached_tensors = [self._load_tensor(path) for path in self.paths]
+
+    def _load_tensor(self, path: Path) -> torch.Tensor:
+        with Image.open(path) as image:
+            return self.transform(image.convert("RGB"))
 
     def __len__(self) -> int:
         return len(self.paths)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, str]:
         path = self.paths[index]
-        with Image.open(path) as image:
-            tensor = self.transform(image.convert("RGB"))
+        if self.cached_tensors is None:
+            tensor = self._load_tensor(path)
+        else:
+            tensor = self.cached_tensors[index]
         label = torch.tensor(class_label(path), dtype=torch.long)
         return tensor, label, str(path)
 
@@ -120,6 +136,7 @@ def make_dataloaders(
     max_train: int | None = None,
     max_test: int | None = None,
     seed: int = 3407,
+    cache_images: bool = False,
 ) -> DataBundle:
     size = image_size or spec.image_size
     train_ds = TrafficImageDataset(
@@ -128,6 +145,8 @@ def make_dataloaders(
         train_normal_only=True,
         max_samples=max_train,
         seed=seed,
+        cache_images=cache_images,
+        cache_workers=workers,
     )
     test_ds = TrafficImageDataset(
         spec.root / "test",
@@ -135,7 +154,12 @@ def make_dataloaders(
         train_normal_only=False,
         max_samples=max_test,
         seed=seed,
+        cache_images=cache_images,
+        cache_workers=workers,
     )
+    loader_kwargs = {}
+    if workers > 0:
+        loader_kwargs = {"persistent_workers": True, "prefetch_factor": 4}
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
@@ -143,6 +167,7 @@ def make_dataloaders(
         drop_last=True if len(train_ds) >= batch_size else False,
         num_workers=workers,
         pin_memory=torch.cuda.is_available(),
+        **loader_kwargs,
     )
     test_loader = DataLoader(
         test_ds,
@@ -151,6 +176,7 @@ def make_dataloaders(
         drop_last=False,
         num_workers=workers,
         pin_memory=torch.cuda.is_available(),
+        **loader_kwargs,
     )
     return DataBundle(train_loader, test_loader, spec, len(train_ds), len(test_ds))
 
