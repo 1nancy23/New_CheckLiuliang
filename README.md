@@ -1,81 +1,83 @@
-# FFT-STGAN-IDS 实验工程
+# FFT-STGAN-IDS
 
-本项目根据 `WSTGAN-IDS.docx`、`Framework.png` 和参考目录
-`A:\DATAS\rt-iot2022` 中 STGAN-IDS 对 UNSW-NB15、CIC-IDS2017、TON_IoT
-三个数据集的处理方式搭建。
+This repository contains the PyTorch implementation and experiment utilities for an unsupervised spatio-temporal GAN intrusion detection model for IIoT traffic. The current version replaces the original wavelet branch with a learnable FFT-band prior and further introduces a weighted positional encoding strategy during traffic-to-image construction.
 
-核心约束：
+## Core Ideas
 
-- 只修改本项目目录内容。
-- Python 环境使用 `D:\new_1\envs\new_conda1\python.exe`。
-- 全部模型网络基于 PyTorch。
-- 实验过程不需要、也不允许执行 `pip install` 或 `pip uninstall`。
-- 原框架中的 DWT/小波分支被替换为 FFT 频带先验分支。
+- Train only on normal traffic and detect abnormal traffic by reconstruction and latent-consistency based anomaly scoring.
+- Convert one-dimensional network-flow feature vectors into two-dimensional traffic images through a correlation-guided feature layout.
+- Use stacked consecutive flows to preserve short-term temporal context.
+- Replace the DWT/wavelet branch with a learnable FFT-band prior to model low-, mid-, high-, and full-frequency responses without requiring an external wavelet package.
+- Add weighted sinusoidal positional encoding and an explicit positional channel so that feature-order information is retained after 1D-to-2D mapping.
 
-## 方法变化
+## Weighted Positional Encoding
 
-`Framework.png` 中原始频率分支使用 DWT 得到多尺度小波先验 `{W1,W2,W3,W4}`。
-本项目将其替换为 **Learnable FFT Band Prior**：
+During preprocessing, each ordered feature vector is mapped into a fixed image grid. For a vector arranged into an \(H \times W\) grid, a sinusoidal positional code is generated from the beginning to the end of the one-dimensional feature sequence:
 
-1. 对输入结构图像执行 `torch.fft.fft2`。
-2. 按频率半径构造低频、中频、高频、全频四组频带响应。
-3. 通过可学习 1x1/3x3 卷积和 Sigmoid gate 生成每个 encoder stage 的频带先验。
-4. 在空间分支、时序 GRU 分支和频带分支间执行融合。
-5. 损失和异常分数中增加频带一致性项，替代原小波一致性项。
-
-这个替代分支不依赖任何小波库或新增第三方包，作用上承担多尺度频率上下文、去噪和结构增强。
-
-## 快速运行
-
-先注册本地参考数据集：
-
-```powershell
-& 'D:\new_1\envs\new_conda1\python.exe' .\scripts\prepare_datasets.py
+```text
+p_i = sin(2 * pi * i / (H * W - 1)),  i = 0, 1, ..., H * W - 1
 ```
 
-正式训练：
+The positional code is reshaped into a positional map \(P \in R^{H \times W}\). The traffic image is then enhanced with a weighted positional term:
 
-```powershell
-& 'D:\new_1\envs\new_conda1\python.exe' .\train.py --dataset all --epochs 30 --batch-size 256 --image-size 16 --device cuda --lr-policy lambda --lr-decay-start 15 --eval-every 5
+```text
+I_pos = I + omega * P
 ```
 
-结果会写入：
+where `omega` is the positional weight. In the latest experiments, `omega = 0.15` is used as the default value. The model input is constructed as a four-channel image:
 
-- `outputs/<dataset>_<timestamp>/metrics.json`
-- `outputs/<dataset>_<timestamp>/scores.csv`
-- `outputs/<dataset>_<timestamp>/loss_curve.png`
-- `outputs/<dataset>_<timestamp>/roc_curve.png`
-- `outputs/<dataset>_<timestamp>/metrics_bar.png`
-- `outputs/summary_metrics.csv`
+1. Three traffic channels built from consecutive flow records with the weighted positional term added.
+2. One independent positional channel containing the reshaped positional map \(P\).
 
-## 数据处理逻辑
+This design lets the network observe both the value distribution of network-flow features and their relative position in the correlation-guided layout. Compared with directly converting the vector into an image, the positional channel reduces feature-order ambiguity and makes the image representation more informative for convolutional and spatio-temporal modules.
 
-参考论文和代码的三个数据集处理方式为：
+## Model Components
 
-- 训练集只使用 normal 样本。
-- 测试集包含 normal 和 abnormal。
-- 数值特征归一化到 `[0,1]`。
-- 使用正常训练样本估计特征相关性布局。
-- 连续三条网络流量映射到 RGB 三通道，窗口内任意异常则该图像标为 abnormal。
+- `SFEM`: multi-scale spatial feature extraction with attention refinement.
+- `TFEM`: temporal feature extraction for short-term traffic context.
+- `STFFM`: spatio-temporal feature fusion.
+- `CFFM`: cross-layer feature fusion to preserve low-level and high-level information.
+- `Learnable FFT Band Prior`: frequency-aware branch that replaces the original wavelet prior.
+- `Focal reconstruction loss`: emphasizes difficult reconstruction samples.
+- `Warmup-cosine learning rate schedule`: used for the latest formal training runs.
 
-`scripts/prepare_datasets.py` 默认不复制大量 PNG，而是在项目内生成 manifest，记录只读参考数据路径和样本数量。若以后只有 CSV，可用 `scripts/preprocess_csv_to_rgb.py` 在项目内生成同样目录结构的数据。
+## Main Files
 
-## 对比实验
+- `src/wstgan_fftids/models.py`: proposed model and comparison-model components.
+- `src/wstgan_fftids/trainer.py`: training, checkpoint loading, scoring, and evaluation logic.
+- `src/wstgan_fftids/preprocess.py`: CSV preprocessing and traffic-image construction.
+- `src/wstgan_fftids/data.py`: dataset loading utilities.
+- `train.py`: proposed-model training entry point.
+- `train_comparisons.py`: comparison-method training entry point.
+- `train_ablation.py`: ablation-study entry point.
+- `noise_robustness.py`: noisy/corrupted traffic robustness evaluation.
+- `parameter_study.py`: internal parameter-study runner.
+- `scripts/create_positional4_from_rgb.py`: utility for constructing four-channel positional inputs from existing three-channel traffic images.
+- `scripts/evaluate_checkpoint.py`: checkpoint evaluation utility.
 
-论文对比方法包括 `IF`、`VAE`、`f-AnoGAN`、`BiGAN`、`MTS-DVGAN`。除 IF 为一次拟合外，其余 PyTorch baseline 均按 30 epoch 训练：
+## Quick Start
+
+Use the configured conda environment and run the proposed method:
 
 ```powershell
-.\scripts\run_comparison_experiments.ps1
+& 'D:\new_1\envs\new_conda1\python.exe' .\train.py --dataset all --epochs 30 --batch-size 256 --image-size 16 --device cuda --eval-every 5
 ```
 
-结果输出到 `outputs/comparison_30_bs256/<timestamp>/`。
-
-## 消融实验
-
-消融实验按论文中的 Baseline/Proposed 思路，并进一步拆分本方法的 FFT 频域先验、GRU 时序分支、ST 融合、CFFM、频域一致性损失、潜空间损失、对抗损失和异常评分组成。所有变体默认使用 30 epoch 与相同学习率下降策略：
+For the latest high-throughput positional four-channel experiments, the batch size can be increased when GPU memory allows:
 
 ```powershell
-.\scripts\run_ablation_experiments.ps1
+& 'D:\new_1\envs\new_conda1\python.exe' .\train.py --dataset all --epochs 500 --batch-size 1024 --image-size 16 --device cuda --lr-policy warmup_cosine --eval-every 10
 ```
 
-结果输出到 `outputs/ablation_30_bs256/<timestamp>/`，其中包含 `ablation_summary.csv`、`ablation_manifest.json`、`ablation_auc_f1.png` 以及每个数据集/变体的模型、指标、ROC、损失曲线和重构图。
+## Outputs
+
+Typical outputs are written under `outputs/`:
+
+- `metrics.json`: final metrics.
+- `scores.csv`: anomaly scores and labels.
+- `loss_curve.png`: training loss visualization.
+- `roc_curve.png`: ROC curve.
+- `metrics_bar.png`: metric bar chart.
+- parameter-study and robustness figures for paper-ready visualization.
+
+Model checkpoints with `.pt` or `.pth` suffixes are ignored by Git and should be managed separately.
