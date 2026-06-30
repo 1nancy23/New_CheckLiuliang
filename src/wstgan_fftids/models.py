@@ -39,10 +39,18 @@ class ConvBlock(nn.Module):
 class FFTBandPrior(nn.Module):
     """Learnable FFT band prior replacing the original DWT/wavelet branch."""
 
-    def __init__(self, out_channels: int) -> None:
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        low_cutoff: float = 0.18,
+        mid_cutoff: float = 0.36,
+    ) -> None:
         super().__init__()
+        self.low_cutoff = low_cutoff
+        self.mid_cutoff = mid_cutoff
         self.proj = nn.Sequential(
-            nn.Conv2d(12, out_channels, 1, bias=False),
+            nn.Conv2d(in_channels * 4, out_channels, 1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
@@ -50,14 +58,13 @@ class FFTBandPrior(nn.Module):
             nn.Sigmoid(),
         )
 
-    @staticmethod
-    def _radial_masks(height: int, width: int, device: torch.device) -> tuple[torch.Tensor, ...]:
+    def _radial_masks(self, height: int, width: int, device: torch.device) -> tuple[torch.Tensor, ...]:
         yy = torch.fft.fftfreq(height, device=device).view(height, 1)
         xx = torch.fft.fftfreq(width, device=device).view(1, width)
         radius = torch.sqrt(xx * xx + yy * yy)
-        low = (radius <= 0.18).float()
-        mid = ((radius > 0.18) & (radius <= 0.36)).float()
-        high = (radius > 0.36).float()
+        low = (radius <= self.low_cutoff).float()
+        mid = ((radius > self.low_cutoff) & (radius <= self.mid_cutoff)).float()
+        high = (radius > self.mid_cutoff).float()
         full = torch.ones_like(radius)
         return low, mid, high, full
 
@@ -76,9 +83,9 @@ class FFTBandPrior(nn.Module):
 class TemporalGRUFusion(nn.Module):
     """GRU attention over spatial positions, used as the temporal branch."""
 
-    def __init__(self, channels: int) -> None:
+    def __init__(self, channels: int, hidden_ratio: float = 0.5) -> None:
         super().__init__()
-        hidden = max(16, channels // 2)
+        hidden = max(16, int(round(channels * hidden_ratio)))
         self.gru = nn.GRU(channels, hidden, num_layers=1, batch_first=True, bidirectional=True)
         self.proj = nn.Linear(hidden * 2, channels)
         self.gate = nn.Sequential(
@@ -98,10 +105,10 @@ class TemporalGRUFusion(nn.Module):
 class SpectralSTFusion(nn.Module):
     """Frequency-aware spatio-temporal fusion module."""
 
-    def __init__(self, channels: int, use_temporal: bool = True) -> None:
+    def __init__(self, channels: int, use_temporal: bool = True, temporal_hidden_ratio: float = 0.5) -> None:
         super().__init__()
         self.use_temporal = use_temporal
-        self.temporal = TemporalGRUFusion(channels)
+        self.temporal = TemporalGRUFusion(channels, hidden_ratio=temporal_hidden_ratio)
         self.fuse = nn.Sequential(
             nn.Conv2d(channels * 3, channels, 1, bias=False),
             nn.BatchNorm2d(channels),
@@ -120,13 +127,14 @@ class SpectralSTFusion(nn.Module):
 class CFFM(nn.Module):
     """Cross-scale feature fusion for decoder skip connections."""
 
-    def __init__(self, in_channels: int, out_channels: int) -> None:
+    def __init__(self, in_channels: int, out_channels: int, bottleneck_ratio: float = 1.0) -> None:
         super().__init__()
+        hidden_channels = max(8, int(round(out_channels * bottleneck_ratio)))
         self.net = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, 1, bias=False),
-            nn.BatchNorm2d(out_channels),
+            nn.Conv2d(in_channels, hidden_channels, 1, bias=False),
+            nn.BatchNorm2d(hidden_channels),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
+            nn.Conv2d(hidden_channels, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.LeakyReLU(0.2, inplace=True),
         )
@@ -141,6 +149,10 @@ class AblationOptions:
     use_temporal: bool = True
     use_st_fusion: bool = True
     use_cffm: bool = True
+    fft_low_cutoff: float = 0.18
+    fft_mid_cutoff: float = 0.36
+    temporal_hidden_ratio: float = 0.5
+    cffm_bottleneck_ratio: float = 1.0
 
 
 class NeutralBandPrior(nn.Module):
@@ -172,16 +184,26 @@ class FFTSTGenerator(nn.Module):
         current = in_channels
         for ch in channels:
             self.encoders.append(ConvBlock(current, ch, stride=2))
-            self.priors.append(FFTBandPrior(ch) if self.ablation.use_fft_prior else NeutralBandPrior(ch))
-            self.fusions.append(SpectralSTFusion(ch, use_temporal=self.ablation.use_temporal))
+            self.priors.append(
+                FFTBandPrior(in_channels, ch, self.ablation.fft_low_cutoff, self.ablation.fft_mid_cutoff)
+                if self.ablation.use_fft_prior
+                else NeutralBandPrior(ch)
+            )
+            self.fusions.append(
+                SpectralSTFusion(
+                    ch,
+                    use_temporal=self.ablation.use_temporal,
+                    temporal_hidden_ratio=self.ablation.temporal_hidden_ratio,
+                )
+            )
             current = ch
 
         self.up3 = nn.ConvTranspose2d(channels[3], channels[2], 4, stride=2, padding=1, bias=False)
-        self.cffm3 = CFFM(channels[2] * 2, channels[2])
+        self.cffm3 = CFFM(channels[2] * 2, channels[2], self.ablation.cffm_bottleneck_ratio)
         self.up2 = nn.ConvTranspose2d(channels[2], channels[1], 4, stride=2, padding=1, bias=False)
-        self.cffm2 = CFFM(channels[1] * 2, channels[1])
+        self.cffm2 = CFFM(channels[1] * 2, channels[1], self.ablation.cffm_bottleneck_ratio)
         self.up1 = nn.ConvTranspose2d(channels[1], channels[0], 4, stride=2, padding=1, bias=False)
-        self.cffm1 = CFFM(channels[0] * 2, channels[0])
+        self.cffm1 = CFFM(channels[0] * 2, channels[0], self.ablation.cffm_bottleneck_ratio)
         self.up0 = nn.ConvTranspose2d(channels[0], channels[0], 4, stride=2, padding=1, bias=False)
         self.out = nn.Sequential(
             nn.BatchNorm2d(channels[0]),
@@ -267,10 +289,11 @@ class ModelBundle:
 
 
 def build_models(
+    in_channels: int = 3,
     base_channels: int = 32,
     device: torch.device | str = "cpu",
     ablation: AblationOptions | None = None,
 ) -> ModelBundle:
-    generator = FFTSTGenerator(base_channels=base_channels, ablation=ablation).to(device)
-    discriminator = Discriminator(base_channels=base_channels).to(device)
+    generator = FFTSTGenerator(in_channels=in_channels, base_channels=base_channels, ablation=ablation).to(device)
+    discriminator = Discriminator(in_channels=in_channels, base_channels=base_channels).to(device)
     return ModelBundle(generator, discriminator)

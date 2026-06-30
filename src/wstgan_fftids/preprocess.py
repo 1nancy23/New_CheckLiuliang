@@ -57,6 +57,31 @@ def _row_to_image(row: np.ndarray, height: int, width: int) -> np.ndarray:
     return (values.reshape(height, width) * 255.0).round().astype(np.uint8)
 
 
+def _position_vector(pixels: int, weight: float) -> np.ndarray:
+    if pixels <= 1:
+        return np.zeros((pixels,), dtype=np.float32)
+    phase = np.linspace(0.0, 2.0 * np.pi, pixels, dtype=np.float32)
+    return (np.sin(phase) * float(weight)).astype(np.float32)
+
+
+def _row_to_positional_image(row: np.ndarray, pos: np.ndarray, height: int, width: int) -> np.ndarray:
+    pixels = height * width
+    values = row[:pixels]
+    if values.shape[0] < pixels:
+        values = np.pad(values, (0, pixels - values.shape[0]), mode="constant", constant_values=0.0)
+    enhanced = np.clip(values.astype(np.float32) + pos, 0.0, 1.0)
+    return (enhanced.reshape(height, width) * 255.0).round().astype(np.uint8)
+
+
+def _position_channel(pos: np.ndarray, height: int, width: int, weight: float) -> np.ndarray:
+    if abs(weight) < 1e-12:
+        scaled = np.full_like(pos, 0.5, dtype=np.float32)
+    else:
+        scaled = (pos / (2.0 * abs(float(weight)))) + 0.5
+    scaled = np.clip(scaled, 0.0, 1.0)
+    return (scaled.reshape(height, width) * 255.0).round().astype(np.uint8)
+
+
 def _save_triplets(
     x: np.ndarray,
     y: np.ndarray,
@@ -83,6 +108,42 @@ def _save_triplets(
             axis=-1,
         )
         Image.fromarray(rgb).save(out_split / cls / f"{prefix}_{saved:08d}.png")
+        counts[cls] += 1
+        saved += 1
+    return counts
+
+
+def _save_positional_4ch(
+    x: np.ndarray,
+    y: np.ndarray,
+    out_split: Path,
+    prefix: str,
+    height: int,
+    width: int,
+    stride: int,
+    position_weight: float,
+) -> dict[str, int]:
+    for cls in ("normal", "abnormal"):
+        (out_split / cls).mkdir(parents=True, exist_ok=True)
+    counts = {"normal": 0, "abnormal": 0}
+    saved = 0
+    pixels = height * width
+    pos = _position_vector(pixels, position_weight)
+    pos_image = _position_channel(pos, height, width, position_weight)
+    for start in range(0, x.shape[0] - 2, stride):
+        block = x[start : start + 3]
+        labels = y[start : start + 3]
+        cls = "abnormal" if int(np.any(labels == 1)) else "normal"
+        rgba = np.stack(
+            [
+                _row_to_positional_image(block[0], pos, height, width),
+                _row_to_positional_image(block[1], pos, height, width),
+                _row_to_positional_image(block[2], pos, height, width),
+                pos_image,
+            ],
+            axis=-1,
+        )
+        Image.fromarray(rgba, mode="RGBA").save(out_split / cls / f"{prefix}_{saved:08d}.png")
         counts[cls] += 1
         saved += 1
     return counts
@@ -154,3 +215,97 @@ def csv_to_rgb_dataset(
     (out_root / "layout_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
     return meta
 
+
+def csv_to_positional_4ch_dataset(
+    train_csv: Path,
+    test_csv: Path,
+    out_root: Path,
+    label_col: str,
+    height: int,
+    width: int,
+    drop_cols: list[str],
+    normal_label: str = "0",
+    stride: int = 3,
+    use_quantile: bool = True,
+    position_weight: float = 0.15,
+) -> dict[str, Any]:
+    train_df = pd.read_csv(train_csv, low_memory=False)
+    test_df = pd.read_csv(test_csv, low_memory=False)
+    if label_col not in train_df.columns or label_col not in test_df.columns:
+        raise KeyError(f"Label column not found: {label_col}")
+
+    feature_cols = [c for c in train_df.columns if c != label_col and c not in drop_cols]
+    feature_cols = [c for c in feature_cols if c in test_df.columns and not train_df[c].isna().all()]
+    train_df = _encode_mixed(train_df, feature_cols)
+    test_df = _encode_mixed(test_df, feature_cols)
+    y_train = _labels_to_binary(train_df[label_col], normal_label)
+    y_test = _labels_to_binary(test_df[label_col], normal_label)
+
+    train_normal = train_df.loc[y_train == 0, feature_cols]
+    if len(train_normal) < 10:
+        raise ValueError("Need at least 10 normal training rows to estimate correlation layout.")
+    ordered = _feature_order(train_normal, feature_cols)
+    pixels = height * width
+    if len(ordered) > pixels:
+        ordered = ordered[:pixels]
+
+    if use_quantile:
+        qt = QuantileTransformer(
+            n_quantiles=min(1000, max(10, len(train_df))),
+            output_distribution="uniform",
+            random_state=3407,
+            subsample=int(1e9),
+        )
+        x_train = qt.fit_transform(train_df[ordered].to_numpy(dtype=np.float64))
+        x_test = qt.transform(test_df[ordered].to_numpy(dtype=np.float64))
+    else:
+        train_values = train_df[ordered].to_numpy(dtype=np.float64)
+        test_values = test_df[ordered].to_numpy(dtype=np.float64)
+        lo = np.nanmin(train_values, axis=0)
+        hi = np.nanmax(train_values, axis=0)
+        span = np.where(hi - lo < 1e-12, 1.0, hi - lo)
+        x_train = (train_values - lo) / span
+        x_test = (test_values - lo) / span
+
+    out_root.mkdir(parents=True, exist_ok=True)
+    train_counts = _save_positional_4ch(
+        x_train[y_train == 0],
+        y_train[y_train == 0],
+        out_root / "train",
+        "train",
+        height,
+        width,
+        stride,
+        position_weight,
+    )
+    test_counts = _save_positional_4ch(
+        x_test,
+        y_test,
+        out_root / "test",
+        "test",
+        height,
+        width,
+        stride,
+        position_weight,
+    )
+    meta = {
+        "train_csv": str(train_csv),
+        "test_csv": str(test_csv),
+        "out_root": str(out_root),
+        "height": height,
+        "width": width,
+        "channels": 4,
+        "position_encoding": "sinusoidal_0_to_2pi",
+        "position_weight": position_weight,
+        "channel_definition": [
+            "flow_t + position_weight * sin(position)",
+            "flow_t+1 + position_weight * sin(position)",
+            "flow_t+2 + position_weight * sin(position)",
+            "position_weight * sin(position), rescaled to image range",
+        ],
+        "features": ordered,
+        "train_counts": train_counts,
+        "test_counts": test_counts,
+    }
+    (out_root / "layout_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    return meta

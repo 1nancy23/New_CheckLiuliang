@@ -35,6 +35,7 @@ class ComparisonConfig:
     batch_size: int = 256
     base_channels: int = 32
     latent_dim: int = 64
+    input_channels: int = 3
     device: str = "cuda"
     seed: int = 3407
     lr_decay_start: int = 15
@@ -105,7 +106,7 @@ def train_if(bundle: DataBundle, cfg: ComparisonConfig, out_dir: Path) -> dict[s
 
 def train_vae(bundle: DataBundle, cfg: ComparisonConfig, out_dir: Path) -> dict[str, float]:
     device = choose_device(cfg.device)
-    model = VAEModel(cfg.latent_dim, cfg.base_channels).to(device)
+    model = VAEModel(cfg.latent_dim, cfg.base_channels, in_channels=cfg.input_channels).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr, betas=(cfg.beta1, 0.999))
     sched = _scheduler(opt, cfg)
     return _train_reconstruction_model("vae", model, opt, sched, bundle, cfg, out_dir)
@@ -113,7 +114,7 @@ def train_vae(bundle: DataBundle, cfg: ComparisonConfig, out_dir: Path) -> dict[
 
 def train_fanogan(bundle: DataBundle, cfg: ComparisonConfig, out_dir: Path) -> dict[str, float]:
     device = choose_device(cfg.device)
-    model = FAnoGANModel(cfg.latent_dim, cfg.base_channels).to(device)
+    model = FAnoGANModel(cfg.latent_dim, cfg.base_channels, in_channels=cfg.input_channels).to(device)
     opt_g = torch.optim.Adam(list(model.encoder.parameters()) + list(model.decoder.parameters()), lr=cfg.lr, betas=(cfg.beta1, 0.999))
     opt_d = torch.optim.Adam(model.discriminator.parameters(), lr=cfg.lr * 0.25, betas=(cfg.beta1, 0.999))
     sched_g = _scheduler(opt_g, cfg)
@@ -123,7 +124,7 @@ def train_fanogan(bundle: DataBundle, cfg: ComparisonConfig, out_dir: Path) -> d
 
 def train_bigan(bundle: DataBundle, cfg: ComparisonConfig, out_dir: Path) -> dict[str, float]:
     device = choose_device(cfg.device)
-    model = BiGANModel(cfg.latent_dim, cfg.base_channels).to(device)
+    model = BiGANModel(cfg.latent_dim, cfg.base_channels, in_channels=cfg.input_channels).to(device)
     opt_g = torch.optim.Adam(list(model.encoder.parameters()) + list(model.generator.parameters()), lr=cfg.lr, betas=(cfg.beta1, 0.999))
     opt_d = torch.optim.Adam(model.discriminator.parameters(), lr=cfg.lr * 0.25, betas=(cfg.beta1, 0.999))
     sched_g = _scheduler(opt_g, cfg)
@@ -133,7 +134,7 @@ def train_bigan(bundle: DataBundle, cfg: ComparisonConfig, out_dir: Path) -> dic
 
 def train_mtsdvgan(bundle: DataBundle, cfg: ComparisonConfig, out_dir: Path) -> dict[str, float]:
     device = choose_device(cfg.device)
-    model = MTSDVGANModel(cfg.latent_dim, cfg.base_channels).to(device)
+    model = MTSDVGANModel(cfg.latent_dim, cfg.base_channels, in_channels=cfg.input_channels).to(device)
     enc_params = list(model.local_encoder.parameters()) + list(model.global_encoder.parameters()) + list(model.decoder.parameters())
     opt_g = torch.optim.Adam(enc_params, lr=cfg.lr, betas=(cfg.beta1, 0.999))
     opt_d = torch.optim.Adam(model.discriminator.parameters(), lr=cfg.lr * 0.25, betas=(cfg.beta1, 0.999))
@@ -480,4 +481,3 @@ def train_comparison_method(method: str, bundle: DataBundle, cfg: ComparisonConf
     if method == "mts-dvgan":
         return train_mtsdvgan(bundle, cfg, out_dir)
     raise ValueError(f"Unknown comparison method: {method}")
-

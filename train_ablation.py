@@ -50,15 +50,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--lr-policy", default="lambda", choices=["lambda", "cosine", "step"])
+    parser.add_argument("--lr-policy", default="warmup_cosine", choices=["lambda", "cosine", "step", "warmup_cosine"])
     parser.add_argument("--lr-decay-start", type=int, default=15)
+    parser.add_argument("--warmup-epochs", type=int, default=4)
+    parser.add_argument("--min-lr-ratio", type=float, default=0.02)
+    parser.add_argument("--adv-loss", default="focal", choices=["bce", "focal"])
+    parser.add_argument("--focal-alpha", type=float, default=0.35)
+    parser.add_argument("--focal-gamma", type=float, default=2.0)
+    parser.add_argument("--threshold-objective", default="acc", choices=["ba", "f1", "acc", "f1_acc"])
+    parser.add_argument("--selection-metric", default="Acc", choices=["AUC", "F1", "Acc", "BA", "F1_Acc"])
+    parser.add_argument("--score-alpha", type=float, default=0.0)
+    parser.add_argument("--score-beta", type=float, default=0.8)
+    parser.add_argument("--score-gamma", type=float, default=0.2)
+    parser.add_argument("--score-delta", type=float, default=0.0)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--ema-decay", type=float, default=0.999)
+    parser.add_argument("--ema-start-epoch", type=int, default=3)
     parser.add_argument("--eval-every", type=int, default=5)
     parser.add_argument("--out-root", default="outputs/ablation_30")
+    parser.add_argument("--pretrained-root", default="", help="Root containing dataset/best_model.pt checkpoints for non-strict ablation initialization.")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--clean-incomplete", action="store_true")
     parser.add_argument("--rebuild-summary", action="store_true")
     parser.add_argument("--run-id", default=None, help="Use a fixed run directory name instead of a new timestamp.")
     return parser.parse_args()
+
+
+def pretrained_for_dataset(root: str, dataset_key: str) -> str:
+    if not root:
+        return ""
+    path = Path(root) / dataset_key / "best_model.pt"
+    if not path.exists():
+        raise FileNotFoundError(f"Missing pretrained checkpoint for {dataset_key}: {path}")
+    return str(path)
 
 
 def variant_config(name: str, base: TrainConfig) -> TrainConfig:
@@ -190,7 +214,21 @@ def main() -> None:
         seed=args.seed,
         lr_policy=args.lr_policy,
         lr_decay_start=args.lr_decay_start,
+        warmup_epochs=args.warmup_epochs,
+        min_lr_ratio=args.min_lr_ratio,
         eval_every=args.eval_every,
+        adv_loss=args.adv_loss,
+        focal_alpha=args.focal_alpha,
+        focal_gamma=args.focal_gamma,
+        threshold_objective=args.threshold_objective,
+        selection_metric=args.selection_metric,
+        score_alpha=args.score_alpha,
+        score_beta=args.score_beta,
+        score_gamma=args.score_gamma,
+        score_delta=args.score_delta,
+        grad_clip=args.grad_clip,
+        ema_decay=args.ema_decay,
+        ema_start_epoch=args.ema_start_epoch,
         summary_path="",
     )
     summary_rows: list[dict[str, str | int | float]] = []
@@ -227,6 +265,9 @@ def main() -> None:
                 if args.clean_incomplete and out_dir.exists():
                     shutil.rmtree(out_dir)
                 cfg = variant_config(variant, base_cfg)
+                pretrained_path = pretrained_for_dataset(args.pretrained_root, dataset_key)
+                if pretrained_path:
+                    cfg = replace(cfg, pretrained_path=pretrained_path, pretrained_strict=False)
                 print(
                     f"Training ablation {variant} on {spec.name}: "
                     f"train={bundle.train_size}, test={bundle.test_size}, out={out_dir}"

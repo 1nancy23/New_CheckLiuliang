@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-decay-start", type=int, default=15)
     parser.add_argument("--eval-every", type=int, default=5)
     parser.add_argument("--out-root", default="outputs/comparison_30_bs256")
+    parser.add_argument("--run-id", default=None)
     return parser.parse_args()
 
 
@@ -55,7 +56,7 @@ def main() -> None:
     if unknown:
         raise ValueError(f"Unknown methods: {unknown}")
 
-    cfg = ComparisonConfig(
+    base_cfg = ComparisonConfig(
         epochs=args.epochs,
         lr=args.lr,
         batch_size=args.batch_size,
@@ -66,7 +67,7 @@ def main() -> None:
         lr_decay_start=args.lr_decay_start,
         eval_every=args.eval_every,
     )
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = args.run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
     out_root = Path(args.out_root) / stamp
     summary_path = out_root / "comparison_summary.csv"
 
@@ -80,6 +81,7 @@ def main() -> None:
             seed=args.seed,
             cache_images=args.cache_images,
         )
+        cfg = ComparisonConfig(**{**base_cfg.__dict__, "input_channels": bundle.input_channels})
         for method in methods:
             method_name = METHOD_NAMES[method]
             out_dir = out_root / dataset_key / method

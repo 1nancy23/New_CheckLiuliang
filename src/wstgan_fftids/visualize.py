@@ -101,6 +101,10 @@ def save_metrics_bar(path: str | Path, metrics: dict[str, float]) -> None:
 
 def tensor_to_pil(tensor: torch.Tensor) -> Image.Image:
     tensor = tensor.detach().cpu().clamp(-1, 1)
+    if tensor.size(0) == 1:
+        tensor = tensor.repeat(3, 1, 1)
+    elif tensor.size(0) >= 4:
+        tensor = tensor[:3]
     array = ((tensor + 1.0) * 127.5).byte().permute(1, 2, 0).numpy()
     return Image.fromarray(array, mode="RGB")
 
@@ -126,4 +130,3 @@ def save_reconstruction_grid(path: str | Path, real: torch.Tensor, fake: torch.T
     scale = max(1, 256 // max(cell_w, cell_h))
     canvas = canvas.resize((canvas.width * scale, canvas.height * scale), Image.Resampling.NEAREST)
     canvas.save(path)
-

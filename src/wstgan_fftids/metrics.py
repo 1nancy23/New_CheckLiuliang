@@ -18,7 +18,7 @@ def minmax(values: np.ndarray) -> np.ndarray:
     return (values - lo) / (hi - lo)
 
 
-def best_balanced_accuracy(labels: np.ndarray, scores: np.ndarray) -> dict[str, float]:
+def best_threshold_metrics(labels: np.ndarray, scores: np.ndarray, objective: str = "ba") -> dict[str, float]:
     labels = np.asarray(labels, dtype=np.int64)
     scores = np.asarray(scores, dtype=np.float64)
     thresholds = np.unique(np.concatenate([np.linspace(0.0, 1.0, 201), scores]))
@@ -39,7 +39,26 @@ def best_balanced_accuracy(labels: np.ndarray, scores: np.ndarray) -> dict[str, 
     tpr = np.divide(tp, total_pos, out=np.zeros_like(tp, dtype=np.float64), where=total_pos != 0)
     tnr = np.divide(tn, total_neg, out=np.zeros_like(tn, dtype=np.float64), where=total_neg != 0)
     ba = 0.5 * (tpr + tnr)
-    best_index = int(np.argmax(ba))
+    precision_all = np.divide(tp, tp + fp, out=np.zeros_like(tp, dtype=np.float64), where=(tp + fp) != 0)
+    recall_all = np.divide(tp, tp + fn, out=np.zeros_like(tp, dtype=np.float64), where=(tp + fn) != 0)
+    f1_all = np.divide(
+        2.0 * precision_all * recall_all,
+        precision_all + recall_all,
+        out=np.zeros_like(precision_all, dtype=np.float64),
+        where=(precision_all + recall_all) != 0,
+    )
+    acc_all = np.divide(tp + tn, np.maximum(1, tp + tn + fp + fn))
+    if objective == "ba":
+        selection = ba
+    elif objective == "f1":
+        selection = f1_all
+    elif objective == "acc":
+        selection = acc_all
+    elif objective == "f1_acc":
+        selection = 0.5 * f1_all + 0.5 * acc_all
+    else:
+        raise ValueError(f"Unsupported threshold objective: {objective}")
+    best_index = int(np.argmax(selection))
 
     best_tp = int(tp[best_index])
     best_tn = int(tn[best_index])
@@ -58,6 +77,8 @@ def best_balanced_accuracy(labels: np.ndarray, scores: np.ndarray) -> dict[str, 
         "Rec": float(recall),
         "FAR": float(far),
         "F1": float(f1),
+        "SelectionScore": float(selection[best_index]),
+        "ThresholdObjective": objective,
         "TP": float(best_tp),
         "TN": float(best_tn),
         "FP": float(best_fp),
@@ -68,6 +89,10 @@ def best_balanced_accuracy(labels: np.ndarray, scores: np.ndarray) -> dict[str, 
     except ValueError:
         best["AUC"] = 0.0
     return best
+
+
+def best_balanced_accuracy(labels: np.ndarray, scores: np.ndarray) -> dict[str, float]:
+    return best_threshold_metrics(labels, scores, objective="ba")
 
 
 def roc_points(labels: np.ndarray, scores: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:

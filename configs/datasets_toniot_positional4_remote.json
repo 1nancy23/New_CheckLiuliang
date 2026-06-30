@@ -1,0 +1,9 @@
+{
+  "toniot": {
+    "name": "TON_IoT-Positional4",
+    "root": "/data/ids_datasets/TONIOT_positional4_w015",
+    "image_size": 16,
+    "channels": 4,
+    "description": "TON_IoT 4-channel traffic images: three position-enhanced flow channels plus one sinusoidal position channel."
+  }
+}

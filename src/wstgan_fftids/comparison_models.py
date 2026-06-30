@@ -18,11 +18,11 @@ def init_weights(module: nn.Module) -> None:
 
 
 class ConvEncoder(nn.Module):
-    def __init__(self, latent_dim: int = 64, variational: bool = False, base_channels: int = 32) -> None:
+    def __init__(self, latent_dim: int = 64, variational: bool = False, base_channels: int = 32, in_channels: int = 3) -> None:
         super().__init__()
         self.variational = variational
         self.features = nn.Sequential(
-            nn.Conv2d(3, base_channels, 4, 2, 1, bias=False),
+            nn.Conv2d(in_channels, base_channels, 4, 2, 1, bias=False),
             nn.BatchNorm2d(base_channels),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(base_channels, base_channels * 2, 4, 2, 1, bias=False),
@@ -51,7 +51,7 @@ class ConvEncoder(nn.Module):
 
 
 class ConvDecoder(nn.Module):
-    def __init__(self, latent_dim: int = 64, base_channels: int = 32) -> None:
+    def __init__(self, latent_dim: int = 64, base_channels: int = 32, out_channels: int = 3) -> None:
         super().__init__()
         self.fc = nn.Linear(latent_dim, base_channels * 4)
         self.net = nn.Sequential(
@@ -64,7 +64,7 @@ class ConvDecoder(nn.Module):
             nn.ConvTranspose2d(base_channels * 2, base_channels, 4, 2, 1, bias=False),
             nn.BatchNorm2d(base_channels),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(base_channels, 3, 4, 2, 1),
+            nn.ConvTranspose2d(base_channels, out_channels, 4, 2, 1),
             nn.Tanh(),
         )
         self.apply(init_weights)
@@ -75,10 +75,10 @@ class ConvDecoder(nn.Module):
 
 
 class ImageDiscriminator(nn.Module):
-    def __init__(self, base_channels: int = 32) -> None:
+    def __init__(self, base_channels: int = 32, in_channels: int = 3) -> None:
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(3, base_channels, 4, 2, 1, bias=False),
+            nn.Conv2d(in_channels, base_channels, 4, 2, 1, bias=False),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(base_channels, base_channels * 2, 4, 2, 1, bias=False),
             nn.BatchNorm2d(base_channels * 2),
@@ -99,9 +99,9 @@ class ImageDiscriminator(nn.Module):
 
 
 class JointDiscriminator(nn.Module):
-    def __init__(self, latent_dim: int = 64, base_channels: int = 32) -> None:
+    def __init__(self, latent_dim: int = 64, base_channels: int = 32, in_channels: int = 3) -> None:
         super().__init__()
-        self.image = ImageDiscriminator(base_channels)
+        self.image = ImageDiscriminator(base_channels, in_channels=in_channels)
         self.joint = nn.Sequential(
             nn.Linear(base_channels * 4 + latent_dim, 128),
             nn.LeakyReLU(0.2, inplace=True),
@@ -116,10 +116,10 @@ class JointDiscriminator(nn.Module):
 
 
 class VAEModel(nn.Module):
-    def __init__(self, latent_dim: int = 64, base_channels: int = 32) -> None:
+    def __init__(self, latent_dim: int = 64, base_channels: int = 32, in_channels: int = 3) -> None:
         super().__init__()
-        self.encoder = ConvEncoder(latent_dim, variational=True, base_channels=base_channels)
-        self.decoder = ConvDecoder(latent_dim, base_channels=base_channels)
+        self.encoder = ConvEncoder(latent_dim, variational=True, base_channels=base_channels, in_channels=in_channels)
+        self.decoder = ConvDecoder(latent_dim, base_channels=base_channels, out_channels=in_channels)
 
     @staticmethod
     def sample(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -132,11 +132,11 @@ class VAEModel(nn.Module):
 
 
 class FAnoGANModel(nn.Module):
-    def __init__(self, latent_dim: int = 64, base_channels: int = 32) -> None:
+    def __init__(self, latent_dim: int = 64, base_channels: int = 32, in_channels: int = 3) -> None:
         super().__init__()
-        self.encoder = ConvEncoder(latent_dim, variational=False, base_channels=base_channels)
-        self.decoder = ConvDecoder(latent_dim, base_channels=base_channels)
-        self.discriminator = ImageDiscriminator(base_channels)
+        self.encoder = ConvEncoder(latent_dim, variational=False, base_channels=base_channels, in_channels=in_channels)
+        self.decoder = ConvDecoder(latent_dim, base_channels=base_channels, out_channels=in_channels)
+        self.discriminator = ImageDiscriminator(base_channels, in_channels=in_channels)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         z = self.encoder(x)
@@ -144,11 +144,11 @@ class FAnoGANModel(nn.Module):
 
 
 class BiGANModel(nn.Module):
-    def __init__(self, latent_dim: int = 64, base_channels: int = 32) -> None:
+    def __init__(self, latent_dim: int = 64, base_channels: int = 32, in_channels: int = 3) -> None:
         super().__init__()
-        self.encoder = ConvEncoder(latent_dim, variational=False, base_channels=base_channels)
-        self.generator = ConvDecoder(latent_dim, base_channels=base_channels)
-        self.discriminator = JointDiscriminator(latent_dim, base_channels)
+        self.encoder = ConvEncoder(latent_dim, variational=False, base_channels=base_channels, in_channels=in_channels)
+        self.generator = ConvDecoder(latent_dim, base_channels=base_channels, out_channels=in_channels)
+        self.discriminator = JointDiscriminator(latent_dim, base_channels, in_channels=in_channels)
         self.latent_dim = latent_dim
 
     def reconstruct(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -159,13 +159,13 @@ class BiGANModel(nn.Module):
 class MTSDVGANModel(nn.Module):
     """A compact dual-variational GAN baseline for image-encoded traffic windows."""
 
-    def __init__(self, latent_dim: int = 64, base_channels: int = 32) -> None:
+    def __init__(self, latent_dim: int = 64, base_channels: int = 32, in_channels: int = 3) -> None:
         super().__init__()
         branch_dim = latent_dim // 2
-        self.local_encoder = ConvEncoder(branch_dim, variational=True, base_channels=base_channels)
-        self.global_encoder = ConvEncoder(branch_dim, variational=True, base_channels=base_channels)
-        self.decoder = ConvDecoder(latent_dim, base_channels=base_channels)
-        self.discriminator = ImageDiscriminator(base_channels)
+        self.local_encoder = ConvEncoder(branch_dim, variational=True, base_channels=base_channels, in_channels=in_channels)
+        self.global_encoder = ConvEncoder(branch_dim, variational=True, base_channels=base_channels, in_channels=in_channels)
+        self.decoder = ConvDecoder(latent_dim, base_channels=base_channels, out_channels=in_channels)
+        self.discriminator = ImageDiscriminator(base_channels, in_channels=in_channels)
 
     @staticmethod
     def sample(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -182,4 +182,3 @@ class MTSDVGANModel(nn.Module):
 
 def kl_loss(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     return -0.5 * torch.mean(1.0 + logvar - mu.pow(2) - logvar.exp())
-

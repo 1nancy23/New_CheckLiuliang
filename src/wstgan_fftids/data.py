@@ -22,6 +22,7 @@ class DatasetSpec:
     name: str
     root: Path
     image_size: int
+    channels: int = 3
     description: str = ""
 
 
@@ -35,6 +36,7 @@ def load_dataset_specs(config_path: str | Path) -> dict[str, DatasetSpec]:
             name=item.get("name", key),
             root=Path(item["root"]),
             image_size=int(item.get("image_size", 16)),
+            channels=int(item.get("channels", 3)),
             description=item.get("description", ""),
         )
     return specs
@@ -58,11 +60,16 @@ class TrafficImageDataset(Dataset):
         self,
         split_root: str | Path,
         image_size: int = 16,
+        channels: int = 3,
         train_normal_only: bool = False,
         max_samples: int | None = None,
         seed: int = 3407,
         cache_images: bool = False,
         cache_workers: int = 0,
+        augment: bool = False,
+        augment_noise_std: float = 0.0,
+        augment_dropout: float = 0.0,
+        augment_scale: float = 0.0,
     ) -> None:
         self.split_root = Path(split_root)
         paths = list_images(self.split_root)
@@ -87,11 +94,24 @@ class TrafficImageDataset(Dataset):
             raise RuntimeError(f"No images found under {self.split_root}")
 
         self.paths = paths
+        self.channels = channels
+        self.augment = augment
+        self.augment_noise_std = max(0.0, augment_noise_std)
+        self.augment_dropout = min(max(0.0, augment_dropout), 0.95)
+        self.augment_scale = max(0.0, augment_scale)
+        if channels == 1:
+            self.image_mode = "L"
+        elif channels == 3:
+            self.image_mode = "RGB"
+        elif channels == 4:
+            self.image_mode = "RGBA"
+        else:
+            raise ValueError(f"Unsupported image channel count: {channels}")
         self.transform = transforms.Compose(
             [
                 transforms.Resize((image_size, image_size)),
                 transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                transforms.Normalize((0.5,) * channels, (0.5,) * channels),
             ]
         )
         self.cached_tensors = None
@@ -104,7 +124,25 @@ class TrafficImageDataset(Dataset):
 
     def _load_tensor(self, path: Path) -> torch.Tensor:
         with Image.open(path) as image:
-            return self.transform(image.convert("RGB"))
+            return self.transform(image.convert(self.image_mode))
+
+    def _augment_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        if not self.augment:
+            return tensor
+        x = tensor.clone()
+        data_channels = min(3, x.shape[0])
+        if self.augment_scale > 0.0 and torch.rand(()) < 0.5:
+            scale = 1.0 + (torch.rand(data_channels, 1, 1) * 2.0 - 1.0) * self.augment_scale
+            x[:data_channels] = x[:data_channels] * scale
+        if self.augment_noise_std > 0.0:
+            noise = torch.randn_like(x) * self.augment_noise_std
+            if x.shape[0] > 3:
+                noise[3:] *= 0.35
+            x = x + noise
+        if self.augment_dropout > 0.0 and torch.rand(()) < 0.35:
+            keep = torch.rand_like(x[:data_channels]) > self.augment_dropout
+            x[:data_channels] = x[:data_channels] * keep
+        return x.clamp(-1.0, 1.0)
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -115,6 +153,7 @@ class TrafficImageDataset(Dataset):
             tensor = self._load_tensor(path)
         else:
             tensor = self.cached_tensors[index]
+        tensor = self._augment_tensor(tensor)
         label = torch.tensor(class_label(path), dtype=torch.long)
         return tensor, label, str(path)
 
@@ -126,6 +165,7 @@ class DataBundle:
     spec: DatasetSpec
     train_size: int
     test_size: int
+    input_channels: int
 
 
 def make_dataloaders(
@@ -137,20 +177,30 @@ def make_dataloaders(
     max_test: int | None = None,
     seed: int = 3407,
     cache_images: bool = False,
+    augment_train: bool = False,
+    augment_noise_std: float = 0.0,
+    augment_dropout: float = 0.0,
+    augment_scale: float = 0.0,
 ) -> DataBundle:
     size = image_size or spec.image_size
     train_ds = TrafficImageDataset(
         spec.root / "train",
         image_size=size,
+        channels=spec.channels,
         train_normal_only=True,
         max_samples=max_train,
         seed=seed,
         cache_images=cache_images,
         cache_workers=workers,
+        augment=augment_train,
+        augment_noise_std=augment_noise_std,
+        augment_dropout=augment_dropout,
+        augment_scale=augment_scale,
     )
     test_ds = TrafficImageDataset(
         spec.root / "test",
         image_size=size,
+        channels=spec.channels,
         train_normal_only=False,
         max_samples=max_test,
         seed=seed,
@@ -178,7 +228,7 @@ def make_dataloaders(
         pin_memory=torch.cuda.is_available(),
         **loader_kwargs,
     )
-    return DataBundle(train_loader, test_loader, spec, len(train_ds), len(test_ds))
+    return DataBundle(train_loader, test_loader, spec, len(train_ds), len(test_ds), spec.channels)
 
 
 def count_split(root: str | Path) -> dict[str, int]:
@@ -202,6 +252,7 @@ def write_manifest(specs: Iterable[DatasetSpec], out_path: str | Path) -> None:
                 "name": spec.name,
                 "root": str(spec.root),
                 "image_size": spec.image_size,
+                "channels": spec.channels,
                 **counts,
             }
         )

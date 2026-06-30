@@ -11,7 +11,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from .data import DataBundle
-from .metrics import best_balanced_accuracy, minmax, roc_points, save_json, save_scores
+from .metrics import best_threshold_metrics, minmax, roc_points, save_json, save_scores
 from .models import AblationOptions, ModelBundle, build_models
 from .visualize import save_line_plot, save_metrics_bar, save_reconstruction_grid, save_roc_plot
 
@@ -35,12 +35,28 @@ class TrainConfig:
     seed: int = 3407
     lr_policy: str = "lambda"
     lr_decay_start: int = 15
+    warmup_epochs: int = 0
+    min_lr_ratio: float = 0.05
     eval_every: int = 5
     summary_path: str = "outputs/summary_metrics.csv"
     use_fft_prior: bool = True
     use_temporal: bool = True
     use_st_fusion: bool = True
     use_cffm: bool = True
+    fft_low_cutoff: float = 0.18
+    fft_mid_cutoff: float = 0.36
+    temporal_hidden_ratio: float = 0.5
+    cffm_bottleneck_ratio: float = 1.0
+    adv_loss: str = "bce"
+    focal_alpha: float = 0.25
+    focal_gamma: float = 2.0
+    threshold_objective: str = "ba"
+    selection_metric: str = "AUC"
+    grad_clip: float = 0.0
+    ema_decay: float = 0.0
+    ema_start_epoch: int = 1
+    pretrained_path: str = ""
+    pretrained_strict: bool = True
 
 
 def seed_everything(seed: int) -> None:
@@ -70,6 +86,19 @@ def _append_summary(path: Path, row: dict[str, str | float | int]) -> None:
 
 
 def _make_scheduler(optimizer: torch.optim.Optimizer, cfg: TrainConfig) -> torch.optim.lr_scheduler.LRScheduler:
+    if cfg.lr_policy == "warmup_cosine":
+        warmup = max(0, min(cfg.warmup_epochs, cfg.epochs - 1))
+        min_ratio = min(max(cfg.min_lr_ratio, 0.0), 1.0)
+
+        def rule(epoch_index: int) -> float:
+            epoch = epoch_index + 1
+            if warmup > 0 and epoch <= warmup:
+                return max(1e-6, epoch / warmup)
+            progress = (epoch - warmup) / max(1, cfg.epochs - warmup)
+            cosine = 0.5 * (1.0 + np.cos(np.pi * min(1.0, progress)))
+            return min_ratio + (1.0 - min_ratio) * cosine
+
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=rule)
     if cfg.lr_policy == "lambda":
         decay_start = max(1, min(cfg.lr_decay_start, cfg.epochs))
 
@@ -97,6 +126,70 @@ def _append_history(path: Path, row: dict[str, float | int | str]) -> None:
         writer.writerow(row)
 
 
+class BinaryFocalWithLogitsLoss(nn.Module):
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0) -> None:
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        prob = torch.sigmoid(logits)
+        pt = torch.where(targets > 0.5, prob, 1.0 - prob)
+        alpha_t = torch.where(targets > 0.5, self.alpha, 1.0 - self.alpha)
+        loss = alpha_t * (1.0 - pt).pow(self.gamma) * bce
+        return loss.mean()
+
+
+def _init_ema(models: list[nn.Module]) -> list[dict[str, torch.Tensor]]:
+    return [{name: param.detach().clone() for name, param in model.state_dict().items()} for model in models]
+
+
+def _update_ema(models: list[nn.Module], shadows: list[dict[str, torch.Tensor]], decay: float) -> None:
+    with torch.no_grad():
+        for model, shadow in zip(models, shadows):
+            for name, value in model.state_dict().items():
+                if value.dtype.is_floating_point:
+                    shadow[name].mul_(decay).add_(value.detach(), alpha=1.0 - decay)
+                else:
+                    shadow[name].copy_(value)
+
+
+def _swap_ema(models: list[nn.Module], shadows: list[dict[str, torch.Tensor]]) -> list[dict[str, torch.Tensor]]:
+    backups = _init_ema(models)
+    for model, shadow in zip(models, shadows):
+        model.load_state_dict(shadow, strict=True)
+    return backups
+
+
+def _selection_value(metrics: dict[str, float], cfg: TrainConfig) -> float:
+    if cfg.selection_metric == "F1_Acc":
+        return 0.5 * metrics["F1"] + 0.5 * metrics["Acc"]
+    if cfg.selection_metric not in metrics:
+        raise ValueError(f"Unsupported selection metric: {cfg.selection_metric}")
+    return float(metrics[cfg.selection_metric])
+
+
+def _load_compatible_state_dict(
+    module: nn.Module,
+    pretrained_state: dict[str, torch.Tensor],
+) -> tuple[torch.nn.modules.module._IncompatibleKeys, int, int]:
+    current_state = module.state_dict()
+    compatible = {}
+    skipped_shape = 0
+    skipped_unknown = 0
+    for key, value in pretrained_state.items():
+        if key not in current_state:
+            skipped_unknown += 1
+            continue
+        if current_state[key].shape != value.shape:
+            skipped_shape += 1
+            continue
+        compatible[key] = value
+    result = module.load_state_dict(compatible, strict=False)
+    return result, skipped_shape, skipped_unknown
+
+
 def train_one_dataset(bundle: DataBundle, cfg: TrainConfig, out_dir: Path) -> dict[str, float]:
     seed_everything(cfg.seed)
     device = choose_device(cfg.device)
@@ -107,18 +200,60 @@ def train_one_dataset(bundle: DataBundle, cfg: TrainConfig, out_dir: Path) -> di
         use_temporal=cfg.use_temporal,
         use_st_fusion=cfg.use_st_fusion,
         use_cffm=cfg.use_cffm,
+        fft_low_cutoff=cfg.fft_low_cutoff,
+        fft_mid_cutoff=cfg.fft_mid_cutoff,
+        temporal_hidden_ratio=cfg.temporal_hidden_ratio,
+        cffm_bottleneck_ratio=cfg.cffm_bottleneck_ratio,
     )
-    models: ModelBundle = build_models(base_channels=cfg.base_channels, device=device, ablation=ablation)
+    models: ModelBundle = build_models(
+        in_channels=bundle.input_channels,
+        base_channels=cfg.base_channels,
+        device=device,
+        ablation=ablation,
+    )
     net_g = models.generator
     net_d = models.discriminator
+    if cfg.pretrained_path:
+        checkpoint = torch.load(cfg.pretrained_path, map_location=device)
+        if "generator" not in checkpoint or "discriminator" not in checkpoint:
+            raise KeyError(f"Pretrained checkpoint must contain generator and discriminator: {cfg.pretrained_path}")
+        mode = "strict" if cfg.pretrained_strict else "non-strict"
+        if cfg.pretrained_strict:
+            g_result = net_g.load_state_dict(checkpoint["generator"], strict=True)
+            d_result = net_d.load_state_dict(checkpoint["discriminator"], strict=True)
+            g_skipped_shape = 0
+            g_skipped_unknown = 0
+            d_skipped_shape = 0
+            d_skipped_unknown = 0
+        else:
+            g_result, g_skipped_shape, g_skipped_unknown = _load_compatible_state_dict(net_g, checkpoint["generator"])
+            d_result, d_skipped_shape, d_skipped_unknown = _load_compatible_state_dict(net_d, checkpoint["discriminator"])
+        print(f"Loaded pretrained checkpoint ({mode}): {cfg.pretrained_path}")
+        if not cfg.pretrained_strict:
+            print(
+                "Pretrained load report: "
+                f"G missing={len(g_result.missing_keys)} unexpected={len(g_result.unexpected_keys)}; "
+                f"G skipped_shape={g_skipped_shape} skipped_unknown={g_skipped_unknown}; "
+                f"D missing={len(d_result.missing_keys)} unexpected={len(d_result.unexpected_keys)}; "
+                f"D skipped_shape={d_skipped_shape} skipped_unknown={d_skipped_unknown}"
+            )
     opt_g = torch.optim.Adam(net_g.parameters(), lr=cfg.lr, betas=(cfg.beta1, 0.999))
     opt_d = torch.optim.Adam(net_d.parameters(), lr=cfg.lr * 0.25, betas=(cfg.beta1, 0.999))
     scheduler_g = _make_scheduler(opt_g, cfg)
     scheduler_d = _make_scheduler(opt_d, cfg)
-    bce = nn.BCEWithLogitsLoss()
+    if cfg.adv_loss == "focal":
+        adv_criterion: nn.Module = BinaryFocalWithLogitsLoss(alpha=cfg.focal_alpha, gamma=cfg.focal_gamma)
+    elif cfg.adv_loss == "bce":
+        adv_criterion = nn.BCEWithLogitsLoss()
+    else:
+        raise ValueError(f"Unsupported adversarial loss: {cfg.adv_loss}")
     loss_log: dict[str, list[float]] = {"g": [], "d": [], "con": [], "lat": [], "freq": []}
+    ema_shadows = _init_ema([net_g, net_d]) if cfg.ema_decay > 0.0 else None
 
     best_metrics: dict[str, float] | None = None
+    best_selection = -float("inf")
+    best_score_rows: list[dict[str, float | int | str]] = []
+    best_roc_data: tuple[np.ndarray, np.ndarray, float] | None = None
     first_real = None
     first_fake = None
     start = time.time()
@@ -138,16 +273,18 @@ def train_one_dataset(bundle: DataBundle, cfg: TrainConfig, out_dir: Path) -> di
             fake_logits, _ = net_d(fake_for_d.detach())
             real_target = torch.ones_like(real_logits)
             fake_target = torch.zeros_like(fake_logits)
-            d_loss = bce(real_logits, real_target) + bce(fake_logits, fake_target)
+            d_loss = adv_criterion(real_logits, real_target) + adv_criterion(fake_logits, fake_target)
             opt_d.zero_grad(set_to_none=True)
             d_loss.backward()
+            if cfg.grad_clip > 0.0:
+                torch.nn.utils.clip_grad_norm_(net_d.parameters(), cfg.grad_clip)
             opt_d.step()
 
             fake, _, _ = net_g(real)
             fake_logits, fake_feat = net_d(fake)
             with torch.no_grad():
                 _, real_feat = net_d(real)
-            adv_loss = bce(fake_logits, torch.ones_like(fake_logits))
+            adv_loss = adv_criterion(fake_logits, torch.ones_like(fake_logits))
             con_loss = F.l1_loss(fake, real)
             lat_loss = F.mse_loss(fake_feat, real_feat.detach())
             freq_loss = net_g.frequency_consistency(real, fake)
@@ -159,7 +296,11 @@ def train_one_dataset(bundle: DataBundle, cfg: TrainConfig, out_dir: Path) -> di
             )
             opt_g.zero_grad(set_to_none=True)
             g_loss.backward()
+            if cfg.grad_clip > 0.0:
+                torch.nn.utils.clip_grad_norm_(net_g.parameters(), cfg.grad_clip)
             opt_g.step()
+            if ema_shadows is not None and epoch >= cfg.ema_start_epoch:
+                _update_ema([net_g, net_d], ema_shadows, cfg.ema_decay)
 
             epoch_loss["g"] += float(g_loss.detach().cpu())
             epoch_loss["d"] += float(d_loss.detach().cpu())
@@ -179,11 +320,26 @@ def train_one_dataset(bundle: DataBundle, cfg: TrainConfig, out_dir: Path) -> di
         score_rows = []
         roc_data = None
         if should_eval:
+            ema_backup = None
+            if ema_shadows is not None and epoch >= cfg.ema_start_epoch:
+                ema_backup = _swap_ema([net_g, net_d], ema_shadows)
             metrics, score_rows, roc_data = evaluate(models, bundle, cfg, device)
+            if ema_backup is not None:
+                _swap_ema([net_g, net_d], ema_backup)
             metrics["epoch"] = float(epoch)
-            if best_metrics is None or metrics["AUC"] > best_metrics["AUC"]:
+            metrics["SelectionMetric"] = cfg.selection_metric
+            selection_value = _selection_value(metrics, cfg)
+            if best_metrics is None or selection_value > best_selection:
+                best_selection = selection_value
                 best_metrics = metrics
-                torch.save({"generator": net_g.state_dict(), "discriminator": net_d.state_dict(), "metrics": metrics}, out_dir / "best_model.pt")
+                best_score_rows = score_rows
+                best_roc_data = roc_data
+                if ema_shadows is not None and epoch >= cfg.ema_start_epoch:
+                    ema_backup = _swap_ema([net_g, net_d], ema_shadows)
+                    torch.save({"generator": net_g.state_dict(), "discriminator": net_d.state_dict(), "metrics": metrics}, out_dir / "best_model.pt")
+                    _swap_ema([net_g, net_d], ema_backup)
+                else:
+                    torch.save({"generator": net_g.state_dict(), "discriminator": net_d.state_dict(), "metrics": metrics}, out_dir / "best_model.pt")
 
         current_lr_g = float(opt_g.param_groups[0]["lr"])
         current_lr_d = float(opt_d.param_groups[0]["lr"])
@@ -214,6 +370,7 @@ def train_one_dataset(bundle: DataBundle, cfg: TrainConfig, out_dir: Path) -> di
                 "Acc": "" if metrics is None else metrics["Acc"],
                 "F1": "" if metrics is None else metrics["F1"],
                 "AUC": "" if metrics is None else metrics["AUC"],
+                "Selection": "" if metrics is None else _selection_value(metrics, cfg),
             },
         )
         print(
@@ -225,14 +382,15 @@ def train_one_dataset(bundle: DataBundle, cfg: TrainConfig, out_dir: Path) -> di
         scheduler_d.step()
 
     assert best_metrics is not None
+    assert best_roc_data is not None
     elapsed = time.time() - start
     best_metrics["seconds"] = float(elapsed)
     best_metrics["train_size"] = float(bundle.train_size)
     best_metrics["test_size"] = float(bundle.test_size)
     best_metrics["variant"] = cfg.ablation_name
     save_json(out_dir / "metrics.json", best_metrics)
-    save_scores(out_dir / "scores.csv", score_rows)
-    fpr, tpr, roc_auc = roc_data
+    save_scores(out_dir / "scores.csv", best_score_rows)
+    fpr, tpr, roc_auc = best_roc_data
     save_line_plot(out_dir / "loss_curve.png", loss_log, f"{bundle.spec.name} training losses")
     save_roc_plot(out_dir / "roc_curve.png", fpr, tpr, roc_auc)
     save_metrics_bar(out_dir / "metrics_bar.png", best_metrics)
@@ -257,6 +415,7 @@ def train_one_dataset(bundle: DataBundle, cfg: TrainConfig, out_dir: Path) -> di
                 "seconds": best_metrics["seconds"],
                 "train_size": int(best_metrics["train_size"]),
                 "test_size": int(best_metrics["test_size"]),
+                "input_channels": int(bundle.input_channels),
             },
         )
     return best_metrics
@@ -303,7 +462,7 @@ def evaluate(
     lat = minmax(np.concatenate(lat_scores))
     freq = minmax(np.concatenate(freq_scores))
     score = minmax(cfg.score_alpha * disc + cfg.score_beta * rec + cfg.score_gamma * lat + cfg.score_delta * freq)
-    metrics = best_balanced_accuracy(y, score)
+    metrics = best_threshold_metrics(y, score, objective=cfg.threshold_objective)
     fpr, tpr, roc_auc = roc_points(y, score)
 
     rows = []

@@ -1,0 +1,9 @@
+{
+  "cic": {
+    "name": "CIC-IDS2017-Positional4",
+    "root": "A:/DATAS/rt-iot2022/CICIDS2017_positional4_w015/CICIDS2017_positional4_w015",
+    "image_size": 16,
+    "channels": 4,
+    "description": "CIC-IDS2017 4-channel traffic images: three position-enhanced flow channels plus one sinusoidal position channel."
+  }
+}
